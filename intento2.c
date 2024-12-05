@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdbool.h>
+
 
 #define MAX_PROCESSES 100 // Número máximo de procesos
 
@@ -24,7 +26,8 @@ typedef struct {
     int id;           // Identificador de la memoria (0 para RAM, 1 para HDD)
     Pagina *pages;    // Arreglo de páginas en memoria
     int num_pages;    // Número de páginas actuales
-    int capacity;     // Capacidad total de la memoria (en número de páginas)
+    int capacity;
+    int memgastada;     // Capacidad total de la memoria (en número de páginas)
 } Memoria;
 
 // Estructura del Sistema Operativo
@@ -71,6 +74,7 @@ Procesos *create_process(int id, int size, int page_size) {
 
 // Función para inicializar la memoria
 void inicializar_memoria(Memoria *mem, int id, int capacity) {
+    
     mem->id = id;
     mem->capacity = capacity;
     mem->num_pages = 0;
@@ -80,7 +84,65 @@ void inicializar_memoria(Memoria *mem, int id, int capacity) {
         mem->pages[i].page_id = i;
         mem->pages[i].in_ram = 0;  // Inicialmente, no está en RAM
     }
+
+    printf("Memoria inicializada:\n");
+    printf("ID de memoria: %d\n", mem->id);
+    printf("Capacidad de memoria: %d\n", mem->capacity);
+    printf("Número de páginas: %d\n", mem->num_pages);
+    printf("Detalles de las páginas:\n");
 }
+
+bool hay_espacio(Memoria *mem, int paginas_necesarias) {
+    return (mem->num_pages + paginas_necesarias <= mem->capacity);
+}
+
+// Función para alojar las páginas de un proceso en RAM o Swap
+void Alojar_en_memoria(Procesos *p, Memoria *ram, Memoria *swap, int sizepagina) {
+    int paginas_necesarias = p->size / sizepagina; // Número de páginas necesarias
+    int paginas_asignadas = 0;
+    int memoria_gastada_en_ram = 0;
+    int memoria_gastada_en_swap = 0;
+
+    // Intentar asignar páginas a la RAM
+    for (int i = 0; i < paginas_necesarias; i++) {
+        if ((ram->num_pages + sizepagina) <= ram->capacity) {
+            // Asignar página a RAM
+            ram->pages[ram->num_pages].process_id = p->id;
+            ram->pages[ram->num_pages].page_id = i;
+            ram->pages[ram->num_pages].in_ram = 1; // En RAM
+            ram->num_pages += sizepagina; // Incrementar considerando el tamaño de la página
+
+            // Actualizar página del proceso
+            p->pages[i].in_ram = 1;
+
+            paginas_asignadas++;
+            memoria_gastada_en_ram += sizepagina; // Registrar el tamaño real en RAM
+            ram->memgastada = memoria_gastada_en_ram;
+        } else if ((swap->num_pages + sizepagina) <= swap->capacity) {
+            // No hay espacio en RAM, intentar asignar a Swap
+            swap->pages[swap->num_pages].process_id = p->id;
+            swap->pages[swap->num_pages].page_id = i;
+            swap->pages[swap->num_pages].in_ram = 0; // En Swap
+            swap->num_pages += sizepagina; // Incrementar considerando el tamaño de la página
+
+            // Actualizar página del proceso
+            p->pages[i].in_ram = 0;
+
+            paginas_asignadas++;
+            memoria_gastada_en_swap += sizepagina; // Registrar el tamaño real en Swap
+            swap -> memgastada = memoria_gastada_en_swap;
+        } else {
+            // No hay espacio suficiente ni en RAM ni en Swap
+            fprintf(stderr, "Error: No hay espacio suficiente en RAM ni en Swap. Terminando simulación.\n");
+            exit(1);
+        }
+    }
+
+    printf("Proceso ID %d: %d páginas asignadas (Memoria gastada en RAM: %d MB, en Swap: %d MB)\n",
+           p->id, paginas_asignadas, memoria_gastada_en_ram , memoria_gastada_en_swap);
+}
+
+
 
 // Función principal
 int main() {
@@ -96,8 +158,8 @@ int main() {
 
     // Inicializar el sistema y la memoria
     Iniciarsistema(&sys);
-    inicializar_memoria(&Ram, 0, ram_memory_size / page_size); // En páginas
-    inicializar_memoria(&Virtual, 1, virtual_memory_size / page_size); // En páginas
+    inicializar_memoria(&Ram, 0, ram_memory_size); // En páginas
+    inicializar_memoria(&Virtual, 1, virtual_memory_size); // En páginas
 
     // Crear procesos cada 2 segundos
     for (int i = 0; i < MAX_PROCESSES; i++) {
@@ -111,14 +173,9 @@ int main() {
         // Crear el proceso
         Procesos *p = create_process(i, process_size, page_size);
 
-        // Imprimir información del proceso y sus páginas
-        printf("Proceso ID: %d, Tamaño: %d MB, Número de páginas: %d\n", 
-               p->id, p->size, p->size / page_size);
         
-        for (int j = 0; j < p->size / page_size; j++) {
-            printf("  Página %d del Proceso %d, en RAM: %d\n", 
-                   p->pages[j].page_id, p->id, p->pages[j].in_ram);
-        }
+        Alojar_en_memoria(p, &Ram, &Virtual, page_size);
+       
 
         // Liberar memoria del proceso
         free(p->pages);
