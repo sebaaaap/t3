@@ -4,15 +4,19 @@
 #include <unistd.h>
 
 #define MAX_PROCESSES 100 // num de procesos 
-#define MAX_MEMORY 1024 // Tamaño máximo de memoria (en MB)
-#define PAGE_SIZE 4     // Tamaño de cada página (en MB)
+     
 
 typedef struct {
     int id;     // identificador
     int size;  // Tamaño del proceso
     int *pages; // Arreglo de páginas del proceso
-    int num_pages; //limite de paginas 
 } Procesos;
+
+typedef struct {
+    int process_id;   // ID del proceso
+    int size;  // tamaño de la pagina
+    int in_ram;       // 1 si está en RAM, 0 si está en swap
+} Pagina;
 
 
 typedef struct {
@@ -31,18 +35,34 @@ void Iniciarsistema(So *sys) {
     sys->num_processes = 0;  // Inicializa la cantidad de procesos activos
 }
 
-Procesos *create_process(int id, int size, int num_pages) {
+Procesos *create_process(int id, int size, int page_size) {
     Procesos *p = malloc(sizeof(Procesos));
+    if (p == NULL) {
+        fprintf(stderr, "Error al asignar memoria para el proceso\n");
+        exit(1);
+    }
+    
     p->id = id;
     p->size = size;
-    p->num_pages = num_pages;
+
+    // Calcular el número de páginas
+    int num_pages = size / page_size;
     p->pages = malloc(num_pages * sizeof(int));
+
+    if (p->pages == NULL) {
+        fprintf(stderr, "Error al asignar memoria para las páginas\n");
+        free(p);
+        exit(1);
+    }
+
     // Inicializar páginas con valores aleatorios
     for (int i = 0; i < num_pages; i++) {
         p->pages[i] = rand() % 1000;  // Ejemplo de valor aleatorio
     }
+
     return p;
 }
+
 
 void Alojar_en_memoria(So *sys, Procesos *p, Memoria *ram, Memoria *Hdd) {
     // Aquí iría la lógica para asignar las páginas a la RAM o swap
@@ -75,36 +95,40 @@ int main() {
     srand(time(NULL));
     
     // Parámetros de entrada
-    int physical_memory_size = 512;  // Memoria física en MB
+    int ram_memory_size = 512;  // Memoria Ram en MB
     int page_size = 4;  // Tamaño de cada página en MB
-    int virtual_memory_size = rand() % (physical_memory_size * 4) + (physical_memory_size * 1.5);  // Memoria virtual aleatoria
+    int virtual_memory_size = rand() % (ram_memory_size * 4) + (ram_memory_size * 1.5);  // Memoria virtual aleatoria
 
     So sys;
     
-    Memoria ram, Hdd;
+    Memoria Ram, Virtual;
 
 
 
     Iniciarsistema(&sys);
 
-    inicializar_memoria(&ram, 0, physical_memory_size / PAGE_SIZE);
-    inicializar_memoria(&Hdd, 1, virtual_memory_size / PAGE_SIZE);
+    inicializar_memoria(&Ram, 0, ram_memory_size);
+    inicializar_memoria(&Virtual, 1, virtual_memory_size);
 
-    // Simulación de procesos
-    for (int i = 0; i < 10; i++) {
 
-        int process_size = rand() % 100 + 10;  // Tamaño del proceso
+     for (int i = 0; i < 100; i++) {
+        int process_size;
 
-        int num_pages = (process_size + page_size - 1) / page_size;
+        // Generar un tamaño de proceso que sea par y múltiplo del tamaño de la página
+        do {
+            process_size = (rand() % (ram_memory_size / page_size)) * page_size; // Tamaño en múltiplos de page_size
+        } while (process_size % 2 != 0 || process_size == 0); // Aseguramos que sea par y no cero
 
-        Procesos *p = create_process(i, process_size, num_pages);
+        // Crear el proceso
+        Procesos *p = create_process(i, process_size, page_size);
 
-        sys.processes[sys.num_processes++] = p;
-
-        Memoria ram = { .id = 0, .pages = malloc(physical_memory_size * sizeof(int)), .num_pages = physical_memory_size / page_size };
-        Memoria Hdd = { .id = 1, .pages = malloc(virtual_memory_size * sizeof(int)), .num_pages = virtual_memory_size / page_size };
-
-        allocate_memory(&sys, p, &ram, &Hdd);
+        // Imprimir información del proceso
+        printf("Proceso ID: %d, Tamaño: %d bytes, Número de páginas: %d\n", 
+               p->id, p->size, p->size / page_size);
+        
+        // Liberar memoria de las páginas
+        free(p->pages);
+        free(p);
     }
 
     // Simulación de accesos a páginas y reemplazo de páginas
