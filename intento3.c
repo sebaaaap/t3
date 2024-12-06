@@ -3,234 +3,183 @@
 #include <time.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <pthread.h>
 
 #define MAX_PROCESSES 100 // Número máximo de procesos
+#define MAX_THREADS 10    // Máximo número de hilos simultáneos
 
 // Estructura de Página
 typedef struct {
-    int process_id;   // ID del proceso al que pertenece la página
-    int page_id;  // Número de página dentro del proceso
-    int in_ram;       // 1 si está en RAM, 0 si está en swap
+    int process_id; // ID del proceso al que pertenece la página
+    int page_id;    // Número de página dentro del proceso
+    int in_ram;     // 1 si está en RAM, 0 si está en swap
+    int size;
 } Pagina;
 
 // Estructura de Proceso
 typedef struct {
-    int id;     // Identificador del proceso
-    int size;   // Tamaño del proceso
+    int id;        // Identificador del proceso
+    int size;      // Tamaño del proceso
     Pagina *pages; // Arreglo de páginas del proceso
 } Procesos;
 
 // Estructura de Memoria
 typedef struct {
-    int id;           // Identificador de la memoria (0 para RAM, 1 para HDD)
-    Pagina *pages;    // Arreglo de páginas en memoria
-    int num_pages;    // Número de páginas actuales
-    int capacity;
-    int memgastada;     // Capacidad total de la memoria (en número de páginas)
+    int id;          // Identificador de la memoria (0 para RAM, 1 para HDD)
+    Pagina *pages;   // Arreglo de páginas en memoria
+    int num_pages;   // Número de páginas actuales
+    int capacity;    // Capacidad total de la memoria (en número de páginas)
+    int memgastada;  // Memoria utilizada
 } Memoria;
 
-// Estructura del Sistema Operativo
-typedef struct {
-    Procesos *processes[MAX_PROCESSES]; // Array de procesos (punteros)
-    int num_processes;  // Número de procesos activos
-} So;
+// Mutex para sincronización
+pthread_mutex_t memory_mutex;
 
-// Función para inicializar el sistema
-void Iniciarsistema(So *sys) {
-    sys->num_processes = 0;  // Inicializa la cantidad de procesos activos
+// Inicializar la memoria
+void inicializar_memoria(Memoria *mem, int id, int capacity) {
+    mem->id = id;
+    mem->capacity = capacity;
+    mem->num_pages = 0;
+    mem->memgastada = 0;
+    mem->pages = malloc(capacity * sizeof(Pagina));
+    for (int i = 0; i < capacity; i++) {
+        mem->pages[i].process_id = -1; // Página vacía
+        mem->pages[i].page_id = i;
+        mem->pages[i].in_ram = 0;
+    }
 }
 
 // Función para crear un proceso con sus páginas
 Procesos *create_process(int id, int size, int page_size) {
     Procesos *p = malloc(sizeof(Procesos));
-    if (p == NULL) {
+    if (!p) {
         fprintf(stderr, "Error al asignar memoria para el proceso\n");
         exit(1);
     }
-    
     p->id = id;
     p->size = size;
 
-    // Calcular el número de páginas
     int num_pages = size / page_size;
     p->pages = malloc(num_pages * sizeof(Pagina));
-
-    if (p->pages == NULL) {
+    if (!p->pages) {
         fprintf(stderr, "Error al asignar memoria para las páginas\n");
         free(p);
         exit(1);
     }
-
-    // Inicializar páginas con valores aleatorios
     for (int i = 0; i < num_pages; i++) {
         p->pages[i].process_id = id;
         p->pages[i].page_id = i;
-        p->pages[i].in_ram = 0;  // Inicialmente, ninguna página está en RAM
+        p->pages[i].in_ram = 0; // Inicialmente no están en RAM
     }
-
     return p;
 }
 
-// Función para inicializar la memoria
-void inicializar_memoria(Memoria *mem, int id, int capacity) {
-    mem->id = id;
-    mem->capacity = capacity;
-    mem->num_pages = 0;
-    mem->pages = malloc(capacity * sizeof(Pagina));
-    for (int i = 0; i < capacity; i++) {
-        mem->pages[i].process_id = -1;  // Indica que la página está vacía
-        mem->pages[i].page_id = i;
-        mem->pages[i].in_ram = 0;  // Inicialmente, no está en RAM
+// Función para alojar una página en RAM
+void alojar_en_ram(Procesos *p, int page_index, Memoria *ram, int page_size) {
+    if (ram->num_pages < ram->capacity) {
+        ram->pages[ram->num_pages].process_id = p->id;
+        ram->pages[ram->num_pages].page_id = page_index;
+        ram->pages[ram->num_pages].in_ram = 1; // Página está en RAM
+        ram->num_pages++;
+        ram->memgastada += page_size;
+        p->pages[page_index].in_ram = 1; // Actualizar estado de la página en el proceso
     }
-
-    printf("Memoria inicializada:\n");
-    printf("ID de memoria: %d\n", mem->id);
-    printf("Capacidad de memoria: %d\n", mem->capacity);
-    printf("Número de páginas: %d\n", mem->num_pages);
-    printf("Detalles de las páginas:\n");
 }
 
-bool hay_espacio(Memoria *mem, int paginas_necesarias) {
-    return (mem->num_pages + paginas_necesarias <= mem->capacity);
+// Función para alojar una página en Swap
+void alojar_en_swap(Procesos *p, int page_index, Memoria *swap, int page_size) {
+    if (swap->num_pages < swap->capacity) {
+        swap->pages[swap->num_pages].process_id = p->id;
+        swap->pages[swap->num_pages].page_id = page_index;
+        swap->pages[swap->num_pages].in_ram = 0; // Página está en Swap
+        swap->num_pages++;
+        swap->memgastada += page_size;
+    }
 }
 
-// Continuación de la función para alojar las páginas de un proceso en RAM o Swap
-void Alojar_en_memoria(Procesos *p, Memoria *ram, Memoria *swap, int sizepagina) {
-    int paginas_necesarias = p->size / sizepagina; // Número de páginas necesarias
+// Función principal para alojar páginas en RAM o Swap
+void alojar_en_memoria(Procesos *p, Memoria *ram, Memoria *swap, int page_size) {
+    pthread_mutex_lock(&memory_mutex); // Bloquear el mutex
+
+    int paginas_necesarias = (p->size + page_size - 1) / page_size; // Redondeo hacia arriba
     int paginas_asignadas = 0;
 
-    // Intentar asignar páginas a la RAM
     for (int i = 0; i < paginas_necesarias; i++) {
         if (ram->num_pages < ram->capacity) {
-            // Asignar página a RAM
-            ram->pages[ram->num_pages] = p->pages[i]; // Copiar la página
-            ram->pages[ram->num_pages].in_ram = 1; // En RAM
-            ram->num_pages++; // Incrementar el número de páginas en RAM
-            paginas_asignadas++;
+            alojar_en_ram(p, i, ram, page_size); // Intentar alojar en RAM
         } else if (swap->num_pages < swap->capacity) {
-            // No hay espacio en RAM, intentar asignar a Swap
-            swap->pages[swap->num_pages] = p->pages[i]; // Copiar la página
-            swap->pages[swap->num_pages].in_ram = 0; // En Swap
-            swap->num_pages++; // Incrementar el número de páginas en Swap
-            paginas_asignadas++;
+            alojar_en_swap(p, i, swap, page_size); // Intentar alojar en Swap
         } else {
-            // No hay espacio suficiente ni en RAM ni en Swap
-            fprintf(stderr, "Error: No hay espacio suficiente en RAM ni en Swap. Terminando simulación.\n");
+            fprintf(stderr, "Error: No hay espacio suficiente en RAM ni Swap.\n");
+            pthread_mutex_unlock(&memory_mutex); // Liberar el mutex antes de salir
             exit(1);
         }
+        paginas_asignadas++;
     }
+
+    // printf("Proceso %d: %d páginas asignadas.\n", p->id, paginas_asignadas);
+    // printf("RAM: %d/%d MB usados.\n", ram->memgastada, ram->capacity * page_size);
+    // printf("Swap: %d/%d MB usados.\n", swap->memgastada, swap->capacity * page_size);
+
+    pthread_mutex_unlock(&memory_mutex); // Liberar el mutex
 }
 
-// Función para finalizar un proceso
-void finalizarproceso(So *sys, int id) {
-    for (int i = 0; i < sys->num_processes; i++) {
-        if (sys->processes[i]->id == id) {
-            // Liberar la memoria de las páginas del proceso
-            free(sys->processes[i]->pages);
-            free(sys->processes[i]);
-            // Mover el último proceso al lugar del que se elimina
-            sys->processes[i] = sys->processes[sys->num_processes - 1];
-            sys->num_processes--;
-            printf("Proceso %d finalizado.\n", id);
-            return;
-        }
-    }
-    printf("Proceso %d no encontrado.\n", id);
+
+// Función para manejar un proceso en un hilo
+void *proceso_hilo(void *arg) {
+    int id = *(int *)arg;
+    free(arg);
+
+    // Tamaño aleatorio del proceso
+    int process_size = (rand() % 128 + 1) * 4; // Multiplo de 4 MB
+    Procesos *p = create_process(id, process_size, 4);
+
+    extern Memoria RAM, SWAP;
+    Alojar_en_memoria(p, &RAM, &SWAP, 4);
+
+    free(p->pages);
+    free(p);
+    pthread_exit(NULL);
 }
 
-// Función para simular el acceso a una dirección virtual
-void simulaDvirtual(So *sys, Memoria *ram, Memoria *swap, int page_size) {
-    int random_process_index = rand() % sys->num_processes;
-    Procesos *p = sys->processes[random_process_index];
-    int random_page_index = rand() % (p->size / page_size);
-    
-    // Verificar si la página está en RAM
-    if (p->pages[random_page_index].in_ram) {
-        printf("Acceso a la página %d del proceso %d: OK (en RAM)\n", random_page_index, p->id);
-    } else {
-        printf("Acceso a la página %d del proceso %d: Page Fault (en Swap)\n", random_page_index, p->id);
-        
-        // Simular el proceso de swap (reemplazo de página)
-        // Aquí puedes implementar una política de reemplazo, por ejemplo, FIFO o LRU.
-        // Para simplificar, vamos a eliminar la primera página en RAM.
-        if (ram->num_pages > 0) {
-            // Eliminar la primera página en RAM
-            ram->num_pages--;
-            printf("Página eliminada de RAM para hacer espacio.\n");
-        } else {
-            fprintf(stderr, "Error: No hay páginas en RAM para eliminar.\n");
-            exit(1);
-        }
-        
-        // Ahora, mover la página del swap a RAM
-        ram->pages[ram->num_pages] = swap->pages[swap->num_pages - 1]; // Mover la última página del swap a RAM
-        ram->pages[ram->num_pages].in_ram = 1; // Ahora está en RAM
-        ram->num_pages++;
-        swap->num_pages--; // Reducir el número de páginas en swap
-    }
-}
+// Memorias globales
+Memoria RAM, SWAP;
 
-// Función principal
 int main() {
     srand(time(NULL));
 
-    // Parámetros de entrada
-    int ram_memory_size = 512;  // Memoria Ram en MB
-    int page_size = 4;  // Tamaño de cada página en MB
-    int virtual_memory_size = rand() % (ram_memory_size * 4) + (ram_memory_size * 1.5); 
+    // Tamaño de RAM y swap
+    int ram_size = 512;  // MB
+    int swap_size = 1024; // MB
 
-    // Inicializar el sistema y la memoria
-    So sys;
-    Memoria Ram, Virtual;
-    Iniciarsistema(&sys);
-    inicializar_memoria(&Ram, 0, ram_memory_size / page_size); // En páginas
-    inicializar_memoria(&Virtual, 1, virtual_memory_size / page_size); // En páginas
+    // Inicializar memoria
+    inicializar_memoria(&RAM, 0, ram_size / 4);
+    inicializar_memoria(&SWAP, 1, swap_size / 4);
 
-    // Crear procesos cada 2 segundos
+    // Inicializar mutex
+    pthread_mutex_init(&memory_mutex, NULL);
+
+    pthread_t threads[MAX_THREADS];
+
     for (int i = 0; i < MAX_PROCESSES; i++) {
-        int process_size;
+        int *id = malloc(sizeof(int));
+        *id = i;
 
-        // Generar un tamaño de proceso que sea múltiplo del tamaño de la página
-        do {
-            process_size = (rand() % (ram_memory_size / page_size)) * page_size; // Tamaño en múltiplos de page_size
-        } while (process_size % page_size != 0 || process_size == 0); // Aseguramos que sea un múltiplo válido
+        pthread_create(&threads[i % MAX_THREADS], NULL, proceso_hilo, id);
 
-        // Crear el proceso
-        Procesos *p = create_process(i, process_size, page_size);
-        sys.processes[sys.num_processes++] = p; // Agregar el proceso al sistema
-
-        // Alojar el proceso en memoria
-        Alojar_en_memoria(p, &Ram, &Virtual, page_size);
-
-        sleep(2); // Esperar 2 segundos antes de crear el siguiente proceso
-    }
-
-    // Simulación de finalizar procesos y acceso a direcciones virtuales
-    time_t start_time = time(NULL);
-    while (difftime(time(NULL), start_time) < 30) { // Ejecutar durante 30 segundos
-        sleep(5); // Esperar 5 segundos
-
-        // Finalizar un proceso aleatorio
-        if (sys.num_processes > 0) {
-            int random_process_index = rand() % sys.num_processes;
-            finalizarproceso(&sys, sys.processes[random_process_index]->id);
+        if ((i + 1) % MAX_THREADS == 0) {
+            for (int j = 0; j < MAX_THREADS; j++) {
+                pthread_join(threads[j], NULL);
+            }
         }
 
-        // Simular acceso a una dirección virtual
-        if (sys.num_processes > 0) {
-            simulaDvirtual(&sys, &Ram, &Virtual, page_size);
-        }
+        sleep(2); // Simulación de tiempo entre procesos
     }
 
-    // Liberar la memoria de RAM y Virtual
-    free(Ram.pages);
-    free(Virtual.pages);
-
-    // Liberar procesos restantes
-    for (int i = 0; i < sys.num_processes; i++) {
-        free(sys.processes[i]->pages);
-        free(sys.processes[i]);
-    }
+    // Liberar memoria
+    free(RAM.pages);
+    free(SWAP.pages);
+    pthread_mutex_destroy(&memory_mutex);
 
     return 0;
 }
